@@ -1,0 +1,880 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,user-scalable=no">
+<title>Tamling Trails: Brackenford</title>
+<style>
+  html,body{margin:0;background:#16141f;color:#d8d4e6;font-family:ui-monospace,Menlo,Consolas,monospace;-webkit-user-select:none;user-select:none;touch-action:manipulation}
+  #wrap{max-width:720px;margin:0 auto;padding:8px;box-sizing:border-box}
+  canvas{width:100%;height:auto;display:block;image-rendering:pixelated;border-radius:6px;background:#000}
+  #pad{display:flex;justify-content:space-between;align-items:center;margin-top:12px;padding:0 8px}
+  .dpad{display:grid;grid-template-columns:repeat(3,52px);grid-template-rows:repeat(3,52px);gap:2px}
+  .btn{background:#34304a;border:0;border-radius:10px;color:#d8d4e6;font:bold 18px ui-monospace,monospace;touch-action:none}
+  .btn:active,.btn.on{background:#5a5480}
+  .ab{display:flex;gap:14px;align-items:center}
+  .ab .btn{width:64px;height:64px;border-radius:50%}
+  .help{font-size:12px;opacity:.7;text-align:center;margin:12px 0 0}
+</style>
+</head>
+<body>
+<div id="wrap">
+  <canvas id="c" width="720" height="480"></canvas>
+  <div id="pad">
+    <div class="dpad">
+      <span></span><button class="btn" data-k="up">▲</button><span></span>
+      <button class="btn" data-k="left">◀</button><span></span><button class="btn" data-k="right">▶</button>
+      <span></span><button class="btn" data-k="down">▼</button><span></span>
+    </div>
+    <div class="ab">
+      <button class="btn" data-k="b">B</button>
+      <button class="btn" data-k="a">A</button>
+    </div>
+  </div>
+  <p class="help">Move: arrows / WASD &nbsp;·&nbsp; A (confirm / talk): Z, Space, Enter &nbsp;·&nbsp; B (cancel / menu): X, Esc</p>
+</div>
+<script>
+'use strict';
+const cv = document.getElementById('c'), ctx = cv.getContext('2d');
+const S = 3, TS = 16, LW = 240, LH = 160;
+const FONT = 'bold 8px ui-monospace,Menlo,Consolas,monospace';
+const SAVE_KEY = 'tamling-trails-save-v1';
+
+/* ================= DATA ================= */
+const TYPE_COL = { plain:'#a8a090', cinder:'#e8703a', tide:'#3f8fd8', sprout:'#5cae4a', gust:'#8fa9e0', stone:'#9a8468' };
+const STRONG = { cinder:['sprout'], sprout:['tide','stone'], tide:['cinder','stone'], stone:['cinder','gust'], gust:['sprout'] };
+function eff(mt, dt) {
+  if (mt === 'plain') return 1;
+  if (STRONG[mt].includes(dt)) return 2;
+  if (mt === dt || (STRONG[dt] || []).includes(mt)) return 0.5;
+  return 1;
+}
+const MOVES = {
+  bump:  { n:'Bump',        t:'plain',  p:40, a:100 },
+  bonk:  { n:'Skull Bonk',  t:'plain',  p:55, a:95 },
+  yowl:  { n:'Yowl',        t:'plain',  fx:['foe','atk',-1], a:100 },
+  stare: { n:'Hard Stare',  t:'plain',  fx:['foe','def',-1], a:100 },
+  brace: { n:'Brace',       t:'stone',  fx:['self','def',1], a:100 },
+  spark: { n:'Spark Spit',  t:'cinder', p:40, a:100 },
+  flare: { n:'Flare Lash',  t:'cinder', p:55, a:95 },
+  squirt:{ n:'Squirt',      t:'tide',   p:40, a:100 },
+  rip:   { n:'Riptail',     t:'tide',   p:55, a:95 },
+  flick: { n:'Leaf Flick',  t:'sprout', p:40, a:100 },
+  thorn: { n:'Thornwhip',   t:'sprout', p:55, a:95 },
+  buffet:{ n:'Wing Buffet', t:'gust',   p:40, a:100 },
+  pebble:{ n:'Pebble Toss', t:'stone',  p:40, a:100 },
+  slam:  { n:'Rockslam',    t:'stone',  p:60, a:90 },
+};
+const SP = {
+  cindrel: { n:'Cindrel', t:'cinder', b:[39,52,43,65], xp:64, rate:.4, learn:[[1,'bump'],[1,'yowl'],[5,'spark'],[9,'flare']] },
+  puddlip: { n:'Puddlip', t:'tide',   b:[44,48,60,43], xp:64, rate:.4, learn:[[1,'bump'],[1,'stare'],[5,'squirt'],[9,'rip']] },
+  mossnib: { n:'Mossnib', t:'sprout', b:[45,49,49,45], xp:64, rate:.4, learn:[[1,'bump'],[1,'yowl'],[5,'flick'],[9,'thorn']] },
+  dustmop: { n:'Dustmop', t:'plain',  b:[40,45,35,55], xp:50, rate:.9, learn:[[1,'bump'],[3,'stare'],[7,'bonk']] },
+  gustlet: { n:'Gustlet', t:'gust',   b:[40,45,40,60], xp:52, rate:.8, learn:[[1,'bump'],[3,'buffet'],[6,'yowl']] },
+  nettlet: { n:'Nettlet', t:'sprout', b:[45,50,45,35], xp:55, rate:.65,learn:[[1,'flick'],[4,'stare'],[10,'thorn']] },
+  pebblit: { n:'Pebblit', t:'stone',  b:[40,55,80,20], xp:60, rate:.6, learn:[[1,'bump'],[1,'brace'],[6,'pebble']] },
+  cragmaw: { n:'Cragmaw', t:'stone',  b:[55,70,90,30], xp:90, rate:.2, learn:[[1,'bump'],[1,'brace'],[6,'pebble'],[10,'slam']] },
+};
+function makeMon(sp, lvl) {
+  const moves = SP[sp].learn.filter(l => l[0] <= lvl).map(l => l[1]).slice(-4);
+  const m = { sp, lvl, xp: 0, moves, hp: 0 };
+  m.hp = maxhp(m);
+  return m;
+}
+const nm = m => SP[m.sp].n;
+const maxhp = m => Math.floor(SP[m.sp].b[0] * 2 * m.lvl / 100) + m.lvl + 10;
+const STAT_I = { atk:1, def:2, spd:3 };
+function stat(m, k, stage = 0) {
+  const base = Math.floor(SP[m.sp].b[STAT_I[k]] * 2 * m.lvl / 100) + 5;
+  return base * (stage >= 0 ? (2 + stage) / 2 : 2 / (2 - stage));
+}
+const need = l => Math.floor(l * l * 1.2) + 8;
+
+/* ================= MAPS ================= */
+const SOLID = new Set('TWRBPGHSL#crb'.split(''));
+const P_KID = { hair:'#6b4a2a', shirt:'#e0a030' }, P_OLD = { hair:'#cfcfd6', shirt:'#6a8f5a' };
+const MAPS = {
+  town: {
+    name: 'Brackenford',
+    rows: [
+      'TTTTTTTTT,,TTTTTTTTT',
+      'T........,,........T',
+      'T.BBBB...,,..PPPP..T',
+      'T.BBBB...,,..PPPP..T',
+      'T.HDHH...,,..HDHH..T',
+      'T..,.S...,,...,.S..T',
+      'T..,,,,,,,,,,,,..F.T',
+      'T.F......,,........T',
+      'T........,,..S.....T',
+      'T..RRRR..,,........T',
+      'T..RRRR..,,..WWWW..T',
+      'T..HLHH..,,..WWWW..T',
+      'T...,....,,..WWWW..T',
+      'T...,,,,,,,........T',
+      'T.F.......F....F...T',
+      'T..................T',
+      'TTTTTTTTTTTTTTTTTTTT',
+    ],
+    warps: { '9,0':['route',7,20,'up'], '10,0':['route',8,20,'up'], '3,4':['lab',5,5,'up'], '14,4':['heal',4,4,'up'] },
+    signs: {
+      '5,5': "KEEPER ODALYS'S STUDY\nTamling research and first partners.",
+      '16,5': 'HEARTH HOUSE\nRest for weary Tamlings. Always free.',
+      '13,8': 'BRACKENFORD\nWhere every trail begins. North: Thistle Walk.',
+      '4,11': "Your house. A note is pinned to the door: 'Gone to market. Go and see Keeper Odalys! Love, Mum.'",
+    },
+    ents: [
+      { id:'kid', x:7, y:8, dir:'down', pal:P_KID, act: async () => say("Wild Tamlings hide in the tall grass on Thistle Walk. Wear one down before you throw a Snare Charm, it works much better!") },
+      { id:'old', x:12, y:13, dir:'left', pal:P_OLD, act: async () => say("If your Tamlings are hurt, the Hearth House up the road will rest them for free. I nap there myself.") },
+      { id:'it_town', item:'tonic', n:1, x:17, y:15 },
+    ],
+  },
+  route: {
+    name: 'Thistle Walk',
+    rows: [
+      'TTTTTTTTTTTTTTTT',
+      'TTTT.GGGG...TTTT',
+      'TTT..GGGG....TTT',
+      'TTT..HDHH..S.TTT',
+      'T.....,........T',
+      'T.....,,,,.....T',
+      'T.gggg...,.rr..T',
+      'T.gggg...,..r..T',
+      'T.gggg...,.....T',
+      'T........,,,,..T',
+      'TTTTTT..gggg,..T',
+      'T.......gggg,..T',
+      'T.......gggg,..T',
+      'T.....,,,,,,,..T',
+      'T.gggg,....TTTTT',
+      'T.gggg,........T',
+      'T.gggg,,,..ggg.T',
+      'T.......,..ggg.T',
+      'T..rr...,..ggg.T',
+      'T.......,......T',
+      'T..S...,,......T',
+      'TTTTTTT,,TTTTTTT',
+    ],
+    warps: { '7,21':['town',9,1,'down'], '8,21':['town',10,1,'down'], '6,3':['gym',5,10,'up'] },
+    signs: {
+      '3,20': 'THISTLE WALK\nTall grass ahead. Wild Tamlings may leap out!',
+      '11,3': 'CAIRN HALL\nWarden Hale: "Steady as stone."',
+    },
+    ents: [
+      { id:'tr_route', x:14, y:11, dir:'left', pal:{ hair:'#2d2d3a', shirt:'#c0483c' }, sight:3,
+        trainer:{ name:'Rambler Tovi', party:[['dustmop',4],['gustlet',4]],
+          pre:"Hey, a new face! My Tamlings and I have walked this trail a hundred times. Let's see yours!",
+          win:"Ha! Beaten on my own trail. You'll do fine.",
+          post:"Warden Hale's Tamlings are Stone types. Sprout and Tide moves crack stone. Cinder just bounces off." } },
+      { id:'it_r1', item:'tonic', n:2, x:2, y:12 },
+      { id:'it_r2', item:'charm', n:3, x:13, y:7 },
+    ],
+  },
+  lab: {
+    name: "Keeper's Study", indoor: true,
+    rows: [
+      '###########',
+      '#bb_____bb#',
+      '#_________#',
+      '#__c_c_c__#',
+      '#_________#',
+      '#_________#',
+      '#####m#####',
+    ],
+    warps: { '5,6':['town',3,5,'down'] },
+    signs: {},
+    ents: [
+      { id:'keeper', x:5, y:1, dir:'down', pal:{ hair:'#7d5fb0', shirt:'#f0f0f5' }, act: keeperTalk },
+      { id:'ped1', ped:'cindrel', x:3, y:3 },
+      { id:'ped2', ped:'puddlip', x:5, y:3 },
+      { id:'ped3', ped:'mossnib', x:7, y:3 },
+    ],
+  },
+  heal: {
+    name: 'Hearth House', indoor: true,
+    rows: [
+      '#########',
+      '#_______#',
+      '#__ccc__#',
+      '#_______#',
+      '#_______#',
+      '####m####',
+    ],
+    warps: { '4,5':['town',14,5,'down'] },
+    signs: {},
+    ents: [ { id:'healer', x:4, y:1, dir:'down', pal:{ hair:'#e07a9a', shirt:'#fbe3ea' }, act: healerTalk } ],
+  },
+  gym: {
+    name: 'Cairn Hall', indoor: true,
+    rows: [
+      '###########',
+      '#_________#',
+      '#_rr___rr_#',
+      '#_________#',
+      '#rrr_rrrrr#',
+      '#_________#',
+      '#_________#',
+      '#rrrrr_rrr#',
+      '#_________#',
+      '#_r_____r_#',
+      '#_________#',
+      '#####m#####',
+    ],
+    warps: { '5,11':['route',6,4,'down'] },
+    signs: {},
+    ents: [
+      { id:'tr_junior', x:1, y:5, dir:'right', pal:{ hair:'#8a6a3a', shirt:'#8d8a94' }, sight:6,
+        trainer:{ name:'Stonehand Bryn', party:[['pebblit',7]],
+          pre:"Nobody reaches Warden Hale without getting past me!",
+          win:"Solid work. Go on through.",
+          post:"Pebblit braces to toughen up. Hit it with Sprout or Tide moves before it does." } },
+      { id:'tr_warden', x:5, y:1, dir:'down', pal:{ hair:'#4a4a55', shirt:'#b0703a' },
+        trainer:{ name:'Warden Hale', party:[['pebblit',8],['cragmaw',10]],
+          pre:"So you're the new trainer from Brackenford. I am Hale, Warden of Cairn Hall. My Tamlings do not budge. Show me you can move a mountain!",
+          win:"Well. The mountain moved.",
+          post:"Wear that Cairn Crest proudly. The trail beyond is yours to walk." },
+        onWin: async () => {
+          G.flags.crest = true;
+          beep(660, .12); beep(880, .25);
+          await say("You received the CAIRN CREST from Warden Hale!");
+          await say("That's the end of this chapter of Tamling Trails. Thanks for playing! You can keep exploring, training and catching.");
+          save();
+        } },
+    ],
+  },
+};
+for (const k in MAPS) { const m = MAPS[k]; m.h = m.rows.length; m.w = m.rows[0].length; }
+const WILD = [['dustmop',45,2,4], ['gustlet',35,2,4], ['nettlet',20,3,5]];
+
+/* ================= STATE ================= */
+let G = null, B = null, mode = 'title', busy = false, clock = 0;
+const P = { moving:false, dx:0, dy:0, t:0, steps:0 };
+const ui = { text:null, menu:null, dim:false, fade:0, fadeTo:0, bang:null };
+const DV = { up:[0,-1], down:[0,1], left:[-1,0], right:[1,0] };
+const fresh = () => ({ map:'town', x:4, y:12, dir:'down', party:[], bag:{ tonic:0, charm:0 }, flags:{} });
+function save() { try { localStorage.setItem(SAVE_KEY, JSON.stringify(G)); return true; } catch (e) { return false; } }
+function load() { try { const s = localStorage.getItem(SAVE_KEY); return s ? JSON.parse(s) : null; } catch (e) { return null; } }
+const lead = () => G.party.find(m => m.hp > 0);
+const sleep = ms => new Promise(r => setTimeout(r, ms));
+async function run(fn) { busy = true; try { await fn(); } catch (e) { console.error(e); } finally { busy = false; } }
+
+/* ================= AUDIO ================= */
+let AC = null;
+function beep(f = 520, d = .05, type = 'square', v = .03) {
+  try {
+    AC = AC || new (window.AudioContext || window.webkitAudioContext)();
+    const o = AC.createOscillator(), g = AC.createGain();
+    o.type = type; o.frequency.value = f; g.gain.value = v;
+    g.gain.exponentialRampToValueAtTime(.0001, AC.currentTime + d);
+    o.connect(g).connect(AC.destination); o.start(); o.stop(AC.currentTime + d);
+  } catch (e) {}
+}
+
+/* ================= INPUT ================= */
+const held = []; let waiter = null;
+const KEYMAP = { ArrowUp:'up', ArrowDown:'down', ArrowLeft:'left', ArrowRight:'right', w:'up', s:'down', a:'left', d:'right',
+  z:'a', ' ':'a', Enter:'a', x:'b', Escape:'b', Backspace:'b' };
+function press(k) {
+  if (waiter) { const w = waiter; waiter = null; w(k); return; }
+  if (mode === 'world' && !busy && !P.moving) {
+    if (k === 'a') interact();
+    else if (k === 'b') run(openMenu);
+  }
+}
+function down(k) { if (DV[k] && !held.includes(k)) held.push(k); press(k); }
+function up(k) { const i = held.indexOf(k); if (i >= 0) held.splice(i, 1); }
+addEventListener('keydown', e => {
+  const k = KEYMAP[e.key.length === 1 ? e.key.toLowerCase() : e.key];
+  if (!k) return; e.preventDefault();
+  if (e.repeat) { if (DV[k] && waiter) press(k); return; }
+  down(k);
+});
+addEventListener('keyup', e => { const k = KEYMAP[e.key.length === 1 ? e.key.toLowerCase() : e.key]; if (k) up(k); });
+addEventListener('blur', () => { held.length = 0; });
+document.querySelectorAll('.btn').forEach(b => {
+  const k = b.dataset.k;
+  b.addEventListener('pointerdown', e => { e.preventDefault(); b.classList.add('on'); down(k); });
+  const off = () => { b.classList.remove('on'); up(k); };
+  b.addEventListener('pointerup', off); b.addEventListener('pointercancel', off); b.addEventListener('pointerleave', off);
+  b.addEventListener('contextmenu', e => e.preventDefault());
+});
+const waitKey = () => new Promise(r => { waiter = r; });
+
+/* ================= UI PRIMITIVES ================= */
+function wrap(text, w) {
+  ctx.font = FONT; const out = [];
+  for (const para of text.split('\n')) {
+    let line = '';
+    for (const word of para.split(' ')) {
+      const t = line ? line + ' ' + word : word;
+      if (ctx.measureText(t).width > w && line) { out.push(line); line = word; } else line = t;
+    }
+    out.push(line);
+  }
+  return out;
+}
+async function say(text) {
+  const lines = wrap(text, 216);
+  for (let i = 0; i < lines.length; i += 2) {
+    const pg = lines.slice(i, i + 2), total = pg.join('').length;
+    ui.text = { lines: pg, n: 0, total };
+    for (;;) {
+      const k = await waitKey();
+      if (k !== 'a' && k !== 'b') continue;
+      if (ui.text.n < total) ui.text.n = total; else break;
+    }
+    beep(700, .03);
+  }
+  ui.text = null;
+}
+async function choose(opts, o = {}) {
+  const w = o.w || 80, h = opts.length * 11 + 9;
+  const prev = ui.menu;
+  const m = ui.menu = { opts, i: 0, x: o.x != null ? o.x : LW - w - 4, y: o.y != null ? o.y : 114 - h, w, h };
+  let res;
+  for (;;) {
+    const k = await waitKey();
+    if (k === 'up') { m.i = (m.i + opts.length - 1) % opts.length; beep(600, .02); }
+    else if (k === 'down') { m.i = (m.i + 1) % opts.length; beep(600, .02); }
+    else if (k === 'a') { res = m.i; beep(760, .03); break; }
+    else if (k === 'b' && o.cancel) { res = -1; break; }
+  }
+  ui.menu = prev;
+  return res;
+}
+async function ask(text, opts, o = {}) {
+  const lines = wrap(text, 216).slice(0, 2);
+  ui.text = { lines, n: 999, total: 0, hold: true };
+  const r = await choose(opts, o);
+  ui.text = null;
+  return r;
+}
+async function fade(to) { ui.fadeTo = to; await sleep(230); ui.fade = to; }
+
+/* ================= WORLD LOGIC ================= */
+const tile = (x, y, m = MAPS[G.map]) => (y < 0 || x < 0 || y >= m.h || x >= m.w) ? 'T' : m.rows[y][x];
+function entVisible(e) {
+  if (e.item) return !G.flags['got_' + e.id];
+  return true;
+}
+const ents = () => MAPS[G.map].ents.filter(entVisible);
+const entAt = (x, y) => ents().find(e => e.x === x && e.y === y);
+const free = (x, y) => !SOLID.has(tile(x, y)) && !entAt(x, y);
+
+function interact() {
+  const [dx, dy] = DV[G.dir];
+  let tx = G.x + dx, ty = G.y + dy;
+  if (tile(tx, ty) === 'c' && !entAt(tx, ty)) { tx += dx; ty += dy; }
+  const e = entAt(tx, ty);
+  if (e) {
+    if (e.pal) e.dir = { up:'down', down:'up', left:'right', right:'left' }[G.dir];
+    if (e.item) return run(() => pickUp(e));
+    if (e.ped) return run(() => pedestal(e));
+    if (e.trainer) return run(() => trainerTalk(e));
+    if (e.act) return run(e.act);
+  }
+  const s = MAPS[G.map].signs[tx + ',' + ty];
+  if (s) run(() => say(s));
+}
+const ITEM_N = { tonic:'Tonic', charm:'Snare Charm' };
+async function pickUp(e) {
+  G.flags['got_' + e.id] = true; G.bag[e.item] += e.n; beep(880, .08);
+  await say(`You found ${e.n} ${ITEM_N[e.item]}${e.n > 1 ? 's' : ''}!`);
+}
+async function keeperTalk() {
+  if (!G.flags.starter) await say("Keeper Odalys: There you are! Three young Tamlings are waiting on the tables. Walk up to one and choose the partner that feels right.");
+  else if (G.flags.crest) await say("Keeper Odalys: The Cairn Crest! I knew you two would get along. Keep walking the trails, there is always more to learn.");
+  else await say("Keeper Odalys: Train in the tall grass on Thistle Walk. Weaken a wild Tamling, then throw a Snare Charm to befriend it. Warden Hale waits in Cairn Hall, north of the walk.");
+}
+async function pedestal(e) {
+  const sp = SP[e.ped];
+  if (G.flags.starter) { await say(G.flags.starter === e.ped ? 'The table is empty now.' : `${sp.n} is waiting for a partner of its own.`); return; }
+  const r = await ask(`${sp.n}, the ${sp.t.toUpperCase()}-type Tamling. Choose it?`, ['Yes', 'No'], { w: 40, cancel: true });
+  if (r !== 0) return;
+  G.flags.starter = e.ped; G.party.push(makeMon(e.ped, 5));
+  G.bag.charm += 5; G.bag.tonic += 3;
+  beep(660, .1); beep(990, .2);
+  await say(`${sp.n} hops into your arms. You have a partner!`);
+  await say("Keeper Odalys: A fine choice. Take these too: 5 Snare Charms and 3 Tonics. Open the menu with B to check your party, use items and save.");
+}
+async function healerTalk() {
+  const r = await ask('Welcome to the Hearth House. Shall I rest your Tamlings?', ['Yes', 'No'], { w: 40, cancel: true });
+  if (r !== 0) { await say('Come back any time.'); return; }
+  await fade(1); healAll(); beep(520, .1); beep(660, .1); beep(780, .2); await sleep(500); await fade(0);
+  save();
+  await say('All rested and bright-eyed. (Game saved.)');
+}
+function healAll() { for (const m of G.party) m.hp = maxhp(m); }
+
+function onStep() {
+  const w = MAPS[G.map].warps[G.x + ',' + G.y];
+  if (w) return run(() => doWarp(w));
+  const tr = seenBy();
+  if (tr) return run(() => trainerSpot(tr));
+  if (tile(G.x, G.y) === 'g' && Math.random() < 0.14 && lead()) run(wildBattle);
+}
+async function doWarp(w) {
+  if (G.map === 'town' && w[0] === 'route' && !G.party.length) {
+    await say("The tall grass ahead is no place to walk alone. Visit Keeper Odalys's study first, the blue-roofed building.");
+    G.y += 1; G.dir = 'down'; return;
+  }
+  beep(300, .08, 'triangle');
+  await fade(1);
+  G.map = w[0]; G.x = w[1]; G.y = w[2]; G.dir = w[3];
+  await fade(0);
+}
+function seenBy() {
+  for (const e of ents()) {
+    if (!e.trainer || !e.sight || G.flags['beat_' + e.id]) continue;
+    const [dx, dy] = DV[e.dir];
+    for (let i = 1; i <= e.sight; i++) {
+      const tx = e.x + dx * i, ty = e.y + dy * i;
+      if (tx === G.x && ty === G.y) return e;
+      if (SOLID.has(tile(tx, ty))) break;
+    }
+  }
+  return null;
+}
+async function trainerSpot(e) {
+  ui.bang = e; beep(900, .15); await sleep(550); ui.bang = null;
+  await trainerBattle(e);
+}
+async function trainerTalk(e) {
+  if (G.flags['beat_' + e.id]) return say(e.trainer.post);
+  if (!lead()) return say("Come back when you have a Tamling at your side.");
+  await trainerBattle(e);
+}
+async function trainerBattle(e) {
+  const t = e.trainer;
+  await say(`${t.name}: ${t.pre}`);
+  const res = await battle({ trainer: t.name, party: t.party.map(p => makeMon(p[0], p[1])) });
+  if (res === 'win') {
+    G.flags['beat_' + e.id] = true;
+    await say(`${t.name}: ${t.win}`);
+    if (e.onWin) await e.onWin();
+  } else await blackout();
+}
+async function wildBattle() {
+  let r = Math.random() * 100, pick = WILD[0];
+  for (const w of WILD) { if (r < w[1]) { pick = w; break; } r -= w[1]; }
+  const lvl = pick[2] + Math.floor(Math.random() * (pick[3] - pick[2] + 1));
+  const res = await battle({ party: [makeMon(pick[0], lvl)] });
+  if (res === 'lose') await blackout();
+}
+async function blackout() {
+  await say('You have no Tamlings left that can battle! You hurry back to the Hearth House...');
+  await fade(1); healAll(); G.map = 'heal'; G.x = 4; G.y = 3; G.dir = 'up'; await fade(0);
+  await say('Your Tamlings were rested back to health.');
+}
+
+/* ================= MENU ================= */
+const monLine = m => `${nm(m).padEnd(8)} Lv${String(m.lvl).padEnd(2)} ${m.hp}/${maxhp(m)}`;
+const pickMon = (cancel = true) => choose(G.party.map(monLine), { w: 124, cancel, x: 58, y: 30 });
+async function openMenu() {
+  ui.dim = true;
+  for (;;) {
+    const i = await choose(['Tamlings', 'Bag', 'Save', 'Close'], { x: 170, y: 6, w: 66, cancel: true });
+    if (i < 0 || i === 3) break;
+    if (i === 0) {
+      if (!G.party.length) { await say("You don't have any Tamlings yet."); continue; }
+      const k = await pickMon(); if (k < 0) continue;
+      const m = G.party[k], s = SP[m.sp];
+      const j = await choose(['Summary', 'Make leader', 'Back'], { x: 150, y: 80, w: 84, cancel: true });
+      if (j === 0) {
+        await say(`${s.n}  ${s.t.toUpperCase()} type  Lv${m.lvl}\nATK ${Math.floor(stat(m,'atk'))}  DEF ${Math.floor(stat(m,'def'))}  SPD ${Math.floor(stat(m,'spd'))}  XP ${m.xp}/${need(m.lvl)}`);
+        await say('Moves: ' + m.moves.map(id => MOVES[id].n).join(', ') + '.');
+      } else if (j === 1) { G.party.splice(k, 1); G.party.unshift(m); await say(`${s.n} now leads the party.`); }
+    } else if (i === 1) {
+      const opts = [`Tonic x${G.bag.tonic}`, `Snare Charm x${G.bag.charm}`];
+      if (G.flags.crest) opts.push('Cairn Crest');
+      const j = await choose(opts, { x: 130, y: 60, w: 104, cancel: true });
+      if (j === 0) {
+        if (!G.bag.tonic) { await say('You have no Tonics.'); continue; }
+        if (!G.party.length) { await say('There is no one to use it on.'); continue; }
+        const k = await pickMon(); if (k < 0) continue;
+        const m = G.party[k];
+        if (m.hp <= 0 || m.hp >= maxhp(m)) { await say("It won't have any effect."); continue; }
+        G.bag.tonic--; m.hp = Math.min(maxhp(m), m.hp + 20); await say(`${nm(m)} recovered some HP.`);
+      } else if (j === 1) await say('Snare Charms befriend wild Tamlings. Use them in battle.');
+      else if (j === 2) await say('The Cairn Crest. Proof that you bested Warden Hale.');
+    } else if (i === 2) await say(save() ? 'Progress saved.' : 'Saving is not available in this browser.');
+  }
+  ui.dim = false;
+}
+
+/* ================= BATTLE ================= */
+async function battle(cfg) {
+  const foes = cfg.party; let fi = 0;
+  const me0 = lead();
+  B = { foe: foes[0], me: me0, wild: !cfg.trainer, st: { me:{ atk:0, def:0 }, foe:{ atk:0, def:0 } },
+        disp: { me: me0.hp, foe: foes[0].hp }, flash: null, hide: {}, charm: false };
+  beep(440, .08); beep(660, .12);
+  await fade(1); mode = 'battle'; await fade(0);
+  if (cfg.trainer) { await say(`${cfg.trainer} challenges you!`); await say(`${cfg.trainer} sends out ${nm(B.foe)}!`); }
+  else await say(`A wild ${nm(B.foe)} leaps out!`);
+  await say(`Go, ${nm(B.me)}!`);
+  const fname = () => (B.wild ? 'Wild ' : 'Foe ') + nm(B.foe);
+  const who = side => side === 'me' ? nm(B.me) : fname();
+
+  async function doMove(side, id) {
+    const mv = MOVES[id], opp = side === 'me' ? 'foe' : 'me', att = B[side], def = B[opp];
+    await say(`${who(side)} used ${mv.n}!`);
+    if (Math.random() * 100 >= mv.a) { await say('It missed!'); return; }
+    if (mv.fx) {
+      const [tg, k, d] = mv.fx, ts = tg === 'self' ? side : opp, st = B.st[ts];
+      if (Math.abs(st[k] + d) > 3) { await say(`${who(ts)}'s ${k === 'atk' ? 'attack' : 'defense'} won't go any ${d < 0 ? 'lower' : 'higher'}.`); return; }
+      st[k] += d; beep(d < 0 ? 240 : 720, .12, 'triangle');
+      await say(`${who(ts)}'s ${k === 'atk' ? 'attack' : 'defense'} ${d < 0 ? 'fell' : 'rose'}!`);
+      return;
+    }
+    const e = eff(mv.t, SP[def.sp].t), crit = Math.random() < 1 / 16;
+    const a = stat(att, 'atk', B.st[side].atk), d = stat(def, 'def', B.st[opp].def);
+    let dmg = Math.floor((2 * att.lvl / 5 + 2) * mv.p * a / d / 50 + 2);
+    dmg = Math.max(1, Math.floor(dmg * e * (mv.t === SP[att.sp].t ? 1.5 : 1) * (crit ? 1.5 : 1) * (0.85 + Math.random() * 0.15)));
+    def.hp = Math.max(0, def.hp - dmg);
+    B.flash = { side: opp, t: 420 }; beep(e > 1 ? 180 : 140, .12, 'sawtooth', .05);
+    await sleep(650);
+    if (crit) await say('A critical strike!');
+    if (e > 1) await say('It hits where it hurts!'); else if (e < 1) await say('It barely leaves a mark...');
+  }
+  function aiMove() {
+    const mv = B.foe.moves, dmg = mv.filter(id => MOVES[id].p);
+    const pool = dmg.length && Math.random() < 0.75 ? dmg : mv;
+    return pool[Math.floor(Math.random() * pool.length)];
+  }
+  async function gainXp(mon, amt) {
+    await say(`${nm(mon)} gained ${amt} XP.`);
+    mon.xp += amt;
+    while (mon.xp >= need(mon.lvl)) {
+      mon.xp -= need(mon.lvl);
+      const old = maxhp(mon); mon.lvl++; mon.hp += maxhp(mon) - old;
+      beep(660, .08); beep(880, .15);
+      await say(`${nm(mon)} grew to level ${mon.lvl}!`);
+      for (const [l, mv] of SP[mon.sp].learn) if (l === mon.lvl && !mon.moves.includes(mv)) {
+        mon.moves.push(mv); if (mon.moves.length > 4) mon.moves.shift();
+        await say(`${nm(mon)} learned ${MOVES[mv].n}!`);
+      }
+    }
+  }
+  function setMe(mon) { B.me = mon; B.st.me = { atk:0, def:0 }; B.disp.me = mon.hp; B.hide.me = false; }
+  async function pickAction() {
+    const i = await ask(`What will ${nm(B.me)} do?`, ['Fight', 'Bag', 'Swap', 'Run'], { w: 52, x: 182, y: 104 });
+    if (i === 0) {
+      const mv = B.me.moves;
+      const j = await choose(mv.map(id => MOVES[id].n.padEnd(12) + MOVES[id].t.toUpperCase()), { w: 112, x: 68, cancel: true });
+      return j < 0 ? null : { t: 'move', id: mv[j] };
+    }
+    if (i === 1) {
+      const j = await choose([`Tonic x${G.bag.tonic}`, `Snare Charm x${G.bag.charm}`], { w: 104, x: 76, cancel: true });
+      if (j === 0) {
+        if (!G.bag.tonic) { await say('You have no Tonics.'); return null; }
+        const k = await pickMon(); if (k < 0) return null;
+        const m = G.party[k];
+        if (m.hp <= 0 || m.hp >= maxhp(m)) { await say("It won't have any effect."); return null; }
+        return { t: 'tonic', mon: m };
+      }
+      if (j === 1) {
+        if (!G.bag.charm) { await say('You have no Snare Charms.'); return null; }
+        if (!B.wild) { await say("You can't snare another trainer's Tamling!"); return null; }
+        if (G.party.length >= 4) { await say('Your party is full. You can travel with 4 Tamlings.'); return null; }
+        return { t: 'charm' };
+      }
+      return null;
+    }
+    if (i === 2) {
+      const k = await pickMon(); if (k < 0) return null;
+      const m = G.party[k];
+      if (m === B.me) { await say(`${nm(m)} is already out!`); return null; }
+      if (m.hp <= 0) { await say(`${nm(m)} has no strength left.`); return null; }
+      return { t: 'swap', mon: m };
+    }
+    if (!B.wild) { await say("There's no running from a trainer battle!"); return null; }
+    return { t: 'run' };
+  }
+
+  let result;
+  outer: for (;;) {
+    const act = await pickAction();
+    if (!act) continue;
+    if (act.t === 'run') {
+      if (stat(B.me, 'spd') >= stat(B.foe, 'spd') || Math.random() < 0.6) { await say('You slipped away safely.'); result = 'ran'; break; }
+      await say("Couldn't get away!");
+    } else if (act.t === 'swap') {
+      await say(`Come back, ${nm(B.me)}!`); setMe(act.mon); await say(`Go, ${nm(B.me)}!`);
+    } else if (act.t === 'tonic') {
+      G.bag.tonic--; act.mon.hp = Math.min(maxhp(act.mon), act.mon.hp + 20);
+      beep(700, .1, 'triangle'); await say(`${nm(act.mon)} recovered some HP.`);
+    } else if (act.t === 'charm') {
+      G.bag.charm--;
+      await say('You threw a Snare Charm!');
+      B.hide.foe = true; B.charm = true; beep(500, .08);
+      const chance = SP[B.foe.sp].rate * (1 - 0.65 * B.foe.hp / maxhp(B.foe)) + 0.05;
+      await sleep(1300);
+      if (Math.random() < chance) {
+        beep(660, .1); beep(880, .1); beep(1040, .25);
+        await say(`Gotcha! ${nm(B.foe)} decided to travel with you!`);
+        G.party.push(B.foe); result = 'caught'; break;
+      }
+      B.hide.foe = false; B.charm = false;
+      await say(`${nm(B.foe)} shook the charm off!`);
+    }
+    let order = ['foe'];
+    if (act.t === 'move') order = stat(B.me, 'spd') >= stat(B.foe, 'spd') ? ['me', 'foe'] : ['foe', 'me'];
+    for (const side of order) {
+      await doMove(side, side === 'me' ? act.id : aiMove());
+      if (B.foe.hp <= 0) {
+        B.hide.foe = true; beep(120, .3, 'sawtooth');
+        await say(`${fname()} is out of strength!`);
+        await gainXp(B.me, Math.floor(SP[B.foe.sp].xp * B.foe.lvl / 7 * (B.wild ? 1 : 1.5)));
+        if (++fi >= foes.length) { result = 'win'; break outer; }
+        B.foe = foes[fi]; B.st.foe = { atk:0, def:0 }; B.disp.foe = B.foe.hp; B.hide.foe = false;
+        await say(`${cfg.trainer} sends out ${nm(B.foe)}!`);
+        break;
+      }
+      if (B.me.hp <= 0) {
+        B.hide.me = true; beep(120, .3, 'sawtooth');
+        await say(`${nm(B.me)} is out of strength!`);
+        if (!lead()) { result = 'lose'; break outer; }
+        for (;;) {
+          ui.text = { lines: ['Choose your next Tamling.'], n: 999, total: 0 };
+          const k = await pickMon(false);
+          ui.text = null;
+          if (G.party[k].hp > 0) { setMe(G.party[k]); break; }
+        }
+        await say(`Go, ${nm(B.me)}!`);
+        break;
+      }
+    }
+  }
+  if (result === 'win' && cfg.trainer) await say(`You defeated ${cfg.trainer}!`);
+  await fade(1); mode = 'world'; B = null; await fade(0);
+  return result;
+}
+
+/* ================= DRAWING ================= */
+const R = (x, y, w, h, c) => { ctx.fillStyle = c; ctx.fillRect(x, y, w, h); };
+function ell(x, y, rx, ry, c) { ctx.fillStyle = c; ctx.beginPath(); ctx.ellipse(x, y, rx, ry, 0, 0, 7); ctx.fill(); }
+function poly(c, ...p) { ctx.fillStyle = c; ctx.beginPath(); ctx.moveTo(p[0], p[1]); for (let i = 2; i < p.length; i += 2) ctx.lineTo(p[i], p[i + 1]); ctx.closePath(); ctx.fill(); }
+function txt(s, x, y, c = '#2a2838', size = 8, align = 'left') {
+  ctx.font = size === 8 ? FONT : `bold ${size}px ui-monospace,Menlo,Consolas,monospace`;
+  ctx.textBaseline = 'top'; ctx.textAlign = align; ctx.fillStyle = c; ctx.fillText(s, x, y);
+}
+function box(x, y, w, h) { R(x, y, w, h, '#2a2838'); R(x + 1, y + 1, w - 2, h - 2, '#fbf8ee'); R(x + 2, y + 2, w - 4, h - 4, '#2a2838'); R(x + 3, y + 3, w - 6, h - 6, '#fbf8ee'); }
+function eye(x, y, r = 2.4) { ell(x, y, r, r * 1.15, '#fff'); ell(x - r * .3, y + .2, r * .55, r * .7, '#1d1b2a'); }
+
+// Creatures are drawn facing left, centred on (0,0), roughly 40 units across.
+const DRAW = {
+  cindrel() {
+    poly('#f2c84b', 10, 4, 22, -14, 19, -2, 24, 2, 16, 10); poly('#e2542c', 13, 4, 20, -8, 18, 0, 20, 4, 15, 8);
+    ell(0, 4, 11, 12, '#e8843a'); ell(-2, 8, 6, 7, '#fbe6c0');
+    poly('#e8843a', -10, -6, -12, -18, -4, -9); poly('#e8843a', 2, -8, 6, -19, 9, -6);
+    ell(-3, -5, 9, 8, '#e8843a'); eye(-7, -6); eye(0, -6); ell(-5, -1, 1.5, 1, '#5a2a1a');
+    ell(-6, 15, 4, 2, '#b85a22'); ell(5, 15, 4, 2, '#b85a22');
+  },
+  puddlip() {
+    poly('#2f78c0', 9, 4, 22, -6, 18, 5, 22, 14);
+    ell(0, 4, 13, 12, '#4f9fe0'); ell(-2, 9, 8, 6, '#c8e6fa');
+    ell(4, -11, 4, 4, '#a6d4f7'); ell(3, -12, 1.2, 1.2, '#fff');
+    eye(-8, -1, 3); eye(1, -1, 3); R(-6, 6, 5, 1, '#1f4f86');
+    ell(-7, 15, 4, 2, '#2f78c0'); ell(5, 15, 4, 2, '#2f78c0');
+  },
+  mossnib() {
+    poly('#3f9440', -6, -8, -16, -20, -1, -12); poly('#3f9440', 4, -9, 12, -22, 9, -7);
+    poly('#7fd06a', -6, -9, -13, -17, -3, -11);
+    ell(0, 5, 12, 11, '#6dbf58'); ell(-2, 9, 7, 6, '#d8f0b8');
+    ell(-1, -4, 9, 7, '#6dbf58'); eye(-6, -4); eye(2, -4); ell(-3, 0, 1.4, 1, '#e58aa0');
+    ell(-6, 15, 4, 2, '#3f9440'); ell(6, 15, 4, 2, '#3f9440');
+  },
+  dustmop() {
+    for (const [x, y, r] of [[-8,2,7],[8,3,7],[0,-6,8],[0,6,9],[-7,-4,5],[7,-4,5]]) ell(x, y, r, r, '#d8c9a6');
+    for (const [x, y, r] of [[-3,-4,5],[4,5,5]]) ell(x, y, r, r, '#ece1c6');
+    eye(-6, 1); eye(1, 1); ell(-6, 15, 3, 2, '#8d7a55'); ell(5, 15, 3, 2, '#8d7a55');
+  },
+  gustlet() {
+    poly('#7f9ad8', 4, -2, 22, -12, 18, 2, 22, 8, 8, 8); poly('#7f9ad8', -6, 2, -20, 6, -8, 10);
+    ell(0, 3, 10, 11, '#b8ccf2'); ell(-2, 8, 6, 5, '#f3f6ff');
+    poly('#7f9ad8', -2, -8, 0, -18, 4, -8); poly('#7f9ad8', 2, -8, 7, -16, 7, -6);
+    eye(-5, -2, 2.6); eye(2, -2, 2.6); poly('#f0b030', -8, 2, -14, 4, -8, 6);
+    R(-4, 13, 2, 4, '#f0b030'); R(2, 13, 2, 4, '#f0b030');
+  },
+  nettlet() {
+    for (let i = 0; i < 8; i++) { const a = i * Math.PI / 4, c = Math.cos(a), s = Math.sin(a); poly('#2d6b3a', c * 16, 4 + s * 15, c * 9 - s * 4, 4 + s * 9 + c * 4, c * 9 + s * 4, 4 + s * 9 - c * 4); }
+    ell(0, 4, 11, 10, '#3f8a4a'); ell(-2, 7, 6, 5, '#7cc070');
+    for (let i = 0; i < 5; i++) { const a = i * 1.257; ell(Math.cos(a) * 4, -10 + Math.sin(a) * 4, 3, 3, '#b06ad0'); }
+    ell(0, -10, 2, 2, '#ffe26a'); eye(-5, 2); eye(2, 2);
+  },
+  pebblit() {
+    poly('#8d7a62', -12, 14, -14, 0, -6, -10, 6, -11, 14, -1, 12, 14);
+    poly('#b3a085', -10, 0, -5, -8, 4, -9, 0, -2); R(-18, 4, 5, 3, '#8d7a62'); R(13, 5, 5, 3, '#8d7a62');
+    eye(-6, 2, 2.6); eye(2, 2, 2.6); R(-5, 8, 6, 1, '#4f4336');
+  },
+  cragmaw() {
+    poly('#6fc0d0', 2, -12, 6, -24, 10, -11); poly('#8fdcea', 8, -10, 15, -20, 15, -7);
+    poly('#7a6852', -16, 16, -19, -2, -9, -14, 9, -15, 19, -3, 17, 16);
+    poly('#a08c70', -14, -2, -8, -12, 6, -13, 0, -4);
+    poly('#4a3d30', -16, 3, 6, 3, 4, 12, -15, 12);
+    for (let i = 0; i < 4; i++) { poly('#fff', -15 + i * 5, 3, -11 + i * 5, 3, -13 + i * 5, 7); poly('#fff', -14 + i * 5, 12, -10 + i * 5, 12, -12 + i * 5, 8); }
+    eye(-9, -5, 2.6); eye(-1, -5, 2.6); R(-12, -9, 5, 1, '#3a2f24'); R(-3, -9, 5, 1, '#3a2f24');
+  },
+};
+function drawMon(sp, cx, cy, sc = 1, flip = false) {
+  ctx.save(); ctx.translate(cx, cy); ctx.scale(flip ? -sc : sc, sc); DRAW[sp](); ctx.restore();
+}
+function drawChar(x, y, dir, step, p) {
+  ell(x + 8, y + 15, 5, 2, 'rgba(0,0,0,.22)');
+  R(x + 5, y + 12, 2, step === 1 ? 2 : 3, '#3a3550'); R(x + 9, y + 12, 2, step === 2 ? 2 : 3, '#3a3550');
+  R(x + 4, y + 7, 8, 6, p.shirt); R(x + 3, y + 8, 1, 3, p.shirt); R(x + 12, y + 8, 1, 3, p.shirt);
+  R(x + 4, y + 1, 8, 7, '#f6cfa4');
+  R(x + 3, y, 10, 3, p.hair);
+  if (dir === 'up') R(x + 4, y + 1, 8, 6, p.hair);
+  else if (dir === 'down') { R(x + 5, y + 4, 2, 2, '#2a2838'); R(x + 9, y + 4, 2, 2, '#2a2838'); }
+  else if (dir === 'left') { R(x + 4, y + 4, 2, 2, '#2a2838'); R(x + 9, y + 1, 3, 5, p.hair); }
+  else { R(x + 10, y + 4, 2, 2, '#2a2838'); R(x + 4, y + 1, 3, 5, p.hair); }
+}
+const ROOF = { R:['#d0524a','#a83a36'], B:['#4a7fd0','#345fa6'], P:['#e58aa8','#c0688a'], G:['#8d8a94','#6c6974'] };
+function drawTile(ch, x, y, tx, ty, indoor) {
+  const h = (tx * 7 + ty * 13) % 5;
+  if (indoor) { R(x, y, 16, 16, '#e6d5b0'); R(x, y + 15, 16, 1, '#d3bf96'); R(x + (ty % 2 ? 4 : 11), y, 1, 15, '#d9c69e'); }
+  else { R(x, y, 16, 16, '#84cc6c'); if (h < 3) { R(x + 2 + h * 4, y + 4 + h * 3, 2, 1, '#6db85a'); R(x + 10 - h * 2, y + 11 - h, 2, 1, '#9ad884'); } }
+  switch (ch) {
+    case ',': R(x, y, 16, 16, '#e6d4a0'); R(x + 3 + h * 2, y + 5 + h, 2, 1, '#d2bd84'); R(x + 11 - h, y + 12 - h, 1, 1, '#f3e6bd'); break;
+    case 'g':
+      R(x, y, 16, 16, '#4f9e48');
+      for (let i = 0; i < 4; i++) { R(x + 1 + i * 4, y + 2 + ((i + h) % 2) * 6, 2, 7, '#357a34'); R(x + 3 + i * 4, y + 6 - ((i + h) % 2) * 3, 1, 6, '#72c460'); }
+      break;
+    case 'T': R(x + 6, y + 10, 4, 6, '#7a5230'); ell(x + 8, y + 7, 8, 7.5, '#2f7d3c'); ell(x + 6, y + 5, 4, 3, '#48a354'); break;
+    case 'W': {
+      R(x, y, 16, 16, '#4c9be0'); const o = Math.floor(clock / 400 + h) % 3;
+      R(x + 2 + o * 3, y + 4, 4, 1, '#a6d4f7'); R(x + 9 - o * 2, y + 11, 4, 1, '#a6d4f7'); break;
+    }
+    case 'F': R(x + 7, y + 9, 2, 4, '#357a34'); ell(x + 8, y + 7, 3.5, 3.5, ['#f06a8a','#f4f0ff','#f0b84a'][h % 3]); R(x + 7, y + 6, 2, 2, '#ffe26a'); break;
+    case 'R': case 'B': case 'P': case 'G': { const c = ROOF[ch]; R(x, y, 16, 16, c[0]); R(x, y + 7, 16, 1, c[1]); R(x, y + 15, 16, 1, c[1]); R(x + (ty % 2 ? 4 : 12), y, 1, 7, c[1]); R(x + (ty % 2 ? 12 : 4), y + 8, 1, 7, c[1]); break; }
+    case 'H': R(x, y, 16, 16, '#f3ead6'); R(x + 4, y + 4, 8, 7, '#7cc0e8'); R(x + 7, y + 4, 1, 7, '#fff'); R(x + 4, y + 7, 8, 1, '#fff'); R(x, y + 14, 16, 2, '#c9b995'); break;
+    case 'D': case 'L': R(x, y, 16, 16, '#f3ead6'); R(x + 2, y + 1, 12, 15, '#5e3d22'); R(x + 3, y + 2, 10, 14, ch === 'D' ? '#2a2030' : '#8a5a34'); if (ch === 'L') R(x + 10, y + 9, 2, 2, '#f0c84a'); break;
+    case 'S': R(x + 7, y + 9, 2, 6, '#7a5230'); R(x + 2, y + 3, 12, 7, '#7a5230'); R(x + 3, y + 4, 10, 5, '#d9b077'); R(x + 4, y + 5, 7, 1, '#7a5230'); R(x + 4, y + 7, 5, 1, '#7a5230'); break;
+    case '#': R(x, y, 16, 16, '#5d4f73'); R(x, y + 13, 16, 3, '#473a5c'); R(x, y, 16, 1, '#75668c'); break;
+    case 'c': R(x, y + 2, 16, 13, '#a87644'); R(x, y + 2, 16, 5, '#d9ad78'); break;
+    case 'm': R(x + 1, y + 3, 14, 12, '#c0483c'); R(x + 3, y + 5, 10, 8, '#e07a5a'); break;
+    case 'r': ell(x + 8, y + 10, 7.5, 6, '#77747e'); ell(x + 8, y + 9, 6.5, 5, '#96939e'); ell(x + 6, y + 7, 3, 2, '#bab7c2'); break;
+    case 'b': R(x, y, 16, 16, '#7a5230'); for (let r = 0; r < 2; r++) for (let i = 0; i < 4; i++) R(x + 1 + i * 4, y + 2 + r * 7, 3, 5, ['#d0524a','#4a7fd0','#e0b040','#5cae4a'][(i + r + h) % 4]); break;
+  }
+}
+function drawWorld() {
+  const m = MAPS[G.map];
+  const px = G.x * TS + (P.moving ? P.dx * TS * P.t : 0), py = G.y * TS + (P.moving ? P.dy * TS * P.t : 0);
+  const cam = (p, size, view) => size <= view ? (size - view) / 2 : Math.max(0, Math.min(size - view, p + 8 - view / 2));
+  const cx = Math.round(cam(px, m.w * TS, LW)), cy = Math.round(cam(py, m.h * TS, LH));
+  R(0, 0, LW, LH, '#111018');
+  ctx.save(); ctx.translate(-cx, -cy);
+  const x0 = Math.max(0, Math.floor(cx / TS)), y0 = Math.max(0, Math.floor(cy / TS));
+  for (let ty = y0; ty < Math.min(m.h, y0 + 12); ty++) for (let tx = x0; tx < Math.min(m.w, x0 + 17); tx++)
+    drawTile(m.rows[ty][tx], tx * TS, ty * TS, tx, ty, m.indoor);
+  const list = ents().map(e => ({ e, y: e.y * TS }));
+  list.push({ pl: true, y: py });
+  list.sort((a, b) => a.y - b.y);
+  for (const o of list) {
+    if (o.pl) { drawChar(Math.round(px), Math.round(py) - 3, G.dir, P.moving ? (P.t < .5 ? 1 : 2) ^ (P.steps & 1 ? 3 : 0) : 0, { hair:'#c8352e', shirt:'#3b6fd4' }); continue; }
+    const e = o.e, x = e.x * TS, y = e.y * TS;
+    if (e.item) { ell(x + 8, y + 14, 4, 1.5, 'rgba(0,0,0,.2)'); ell(x + 8, y + 9, 4.5, 4.5, '#d0524a'); R(x + 6, y + 3, 4, 3, '#a83a36'); ell(x + 6.5, y + 7.5, 1.5, 1.5, '#f6b0a8'); }
+    else if (e.ped) { if (G.flags.starter !== e.ped) drawMon(e.ped, x + 8, y + 1, .36); }
+    else drawChar(x, y - 3, e.dir, 0, e.pal);
+  }
+  if (ui.bang) { const e = ui.bang; box(e.x * TS + 2, e.y * TS - 18, 12, 14); txt('!', e.x * TS + 8, e.y * TS - 15, '#d0524a', 8, 'center'); }
+  ctx.restore();
+  if (!busy) { const w = ctx.measureText(m.name).width; R(3, 3, w + 8, 12, 'rgba(26,24,38,.6)'); txt(m.name, 7, 5, '#fff'); }
+}
+function hpBar(x, y, w, v, max) {
+  const f = Math.max(0, Math.min(1, v / max));
+  R(x, y, w, 5, '#2a2838'); R(x + 1, y + 1, w - 2, 3, '#55506a');
+  R(x + 1, y + 1, Math.round((w - 2) * f), 3, f > .5 ? '#4cc058' : f > .2 ? '#e8b030' : '#e0483c');
+}
+function drawBattle() {
+  const g = ctx.createLinearGradient(0, 0, 0, 118); g.addColorStop(0, '#bfe4f5'); g.addColorStop(1, '#eef7d8');
+  ctx.fillStyle = g; ctx.fillRect(0, 0, LW, 118);
+  ell(152, 64, 40, 9, '#7fbf6a'); ell(152, 63, 36, 7, '#9ad884');
+  ell(62, 118, 56, 13, '#7fbf6a'); ell(62, 117, 52, 11, '#9ad884');
+  const blink = s => B.flash && B.flash.side === s && Math.floor(B.flash.t / 70) % 2;
+  if (!B.hide.foe && !blink('foe')) drawMon(B.foe.sp, 152, 44 + Math.sin(clock / 400) * 1.2, 1.1);
+  if (B.charm) { const w = Math.sin(clock / 90) * 3; ell(152 + w, 54, 6, 6, '#d0524a'); ell(152 + w, 54, 3, 3, '#f6e27a'); R(150 + w, 46, 4, 3, '#a83a36'); }
+  if (!B.hide.me && !blink('me')) drawMon(B.me.sp, 62, 92 + Math.sin(clock / 400 + 2) * 1.2, 1.6, true);
+  // foe panel
+  box(6, 8, 104, 28);
+  txt(nm(B.foe), 12, 13); txt('Lv' + B.foe.lvl, 104, 13, '#2a2838', 8, 'right');
+  txt('HP', 12, 24, '#b07020'); hpBar(26, 25, 78, B.disp.foe, maxhp(B.foe));
+  // my panel
+  box(130, 67, 106, 36);
+  txt(nm(B.me), 136, 72); txt('Lv' + B.me.lvl, 230, 72, '#2a2838', 8, 'right');
+  txt('HP', 136, 83, '#b07020'); hpBar(150, 84, 80, B.disp.me, maxhp(B.me));
+  txt(`${Math.max(0, Math.ceil(B.disp.me))}/${maxhp(B.me)}`, 230, 91, '#2a2838', 8, 'right');
+  R(136, 98, 60, 2, '#c8c2d8'); R(136, 98, Math.round(60 * Math.min(1, B.me.xp / need(B.me.lvl))), 2, '#4a9be0');
+}
+function drawTitle() {
+  const g = ctx.createLinearGradient(0, 0, 0, LH); g.addColorStop(0, '#8fd0f0'); g.addColorStop(.6, '#d8f0c0'); g.addColorStop(1, '#84cc6c');
+  ctx.fillStyle = g; ctx.fillRect(0, 0, LW, LH);
+  for (let i = 0; i < 16; i++) drawTile('T', i * 16 - 8, 132, i, 3, false);
+  txt('TAMLING TRAILS', 121, 19, '#2a5a34', 20, 'center'); txt('TAMLING TRAILS', 120, 18, '#fff', 20, 'center');
+  txt('Chapter 1: Brackenford', 120, 42, '#2a5a34', 8, 'center');
+  drawMon('cindrel', 70, 86 + Math.sin(clock / 300) * 2, 1.1, true);
+  drawMon('mossnib', 120, 90 + Math.sin(clock / 300 + 2) * 2, 1.1);
+  drawMon('puddlip', 170, 86 + Math.sin(clock / 300 + 4) * 2, 1.1);
+}
+function render() {
+  if (mode === 'title') drawTitle(); else if (mode === 'battle' && B) drawBattle(); else drawWorld();
+  if (ui.dim) R(0, 0, LW, LH, 'rgba(20,18,30,.45)');
+  if (ui.text || mode === 'battle') {
+    box(4, 118, 232, 40);
+    if (ui.text) {
+      let n = Math.floor(ui.text.n);
+      ui.text.lines.forEach((l, i) => { const s = l.slice(0, Math.max(0, n)); n -= l.length; txt(s, 12, 126 + i * 12); });
+      if (!ui.text.hold && !ui.menu && ui.text.n >= ui.text.total && Math.floor(clock / 300) % 2) poly('#d0524a', 222, 148, 228, 148, 225, 152);
+    }
+  }
+  if (ui.menu) {
+    const m = ui.menu; box(m.x, m.y, m.w, m.h);
+    m.opts.forEach((o, i) => { txt(o, m.x + 13, m.y + 6 + i * 11); if (i === m.i) poly('#d0524a', m.x + 6, m.y + 6 + i * 11, m.x + 10, m.y + 9.5 + i * 11, m.x + 6, m.y + 13 + i * 11); });
+  }
+  if (ui.fade > 0) R(0, 0, LW, LH, `rgba(16,14,24,${ui.fade})`);
+}
+function update(dt) {
+  clock += dt;
+  if (ui.text && ui.text.n < ui.text.total) ui.text.n += dt * 0.07;
+  if (ui.fade !== ui.fadeTo) { const d = dt / 200; ui.fade = ui.fade < ui.fadeTo ? Math.min(ui.fadeTo, ui.fade + d) : Math.max(ui.fadeTo, ui.fade - d); }
+  if (B) {
+    if (B.flash && (B.flash.t -= dt) <= 0) B.flash = null;
+    for (const s of ['me', 'foe']) { const t = B[s].hp, d = dt * maxhp(B[s]) / 500; B.disp[s] = B.disp[s] < t ? Math.min(t, B.disp[s] + d) : Math.max(t, B.disp[s] - d); }
+  }
+  if (mode === 'world' && G) {
+    if (P.moving) { P.t += dt / 170; if (P.t >= 1) { G.x += P.dx; G.y += P.dy; P.moving = false; P.t = 0; P.steps++; onStep(); } }
+    if (!P.moving && !busy && held.length) {
+      const d = held[held.length - 1]; G.dir = d;
+      const [dx, dy] = DV[d];
+      if (free(G.x + dx, G.y + dy)) { P.moving = true; P.dx = dx; P.dy = dy; P.t = 0; }
+    }
+  }
+}
+let last = 0;
+function frame(t) {
+  const dt = Math.min(50, t - last); last = t;
+  update(dt);
+  ctx.setTransform(S, 0, 0, S, 0, 0);
+  render();
+  requestAnimationFrame(frame);
+}
+
+/* ================= BOOT ================= */
+async function title() {
+  mode = 'title';
+  const sv = load();
+  const opts = sv ? ['Continue', 'New Game'] : ['New Game'];
+  const i = await choose(opts, { x: 84, y: 112, w: 72 });
+  await fade(1);
+  if (sv && i === 0) { G = sv; mode = 'world'; await fade(0); return; }
+  G = fresh(); mode = 'world'; await fade(0);
+  await say("Brackenford. A quiet town where trails begin. Today you're old enough to walk them with a Tamling of your own.");
+  await say("Keeper Odalys is expecting you at her study, the blue-roofed building to the north.");
+}
+window.__game = { get G() { return G; }, get B() { return B; }, get mode() { return mode; }, get busy() { return busy; }, get ui() { return ui; }, MAPS, SP, MOVES, makeMon };
+requestAnimationFrame(frame);
+run(title);
+</script>
+</body>
+</html>
